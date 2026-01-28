@@ -1,0 +1,67 @@
+----------------------------> connection (Socket Connection) <------------------------------------------
+
+Trigger: When a user first opens the application/website.
+
+* What it does:
+    1. Extracts username and roomId from the connection URL.
+    2. Joins the socket into a specific Socket.IO room 
+        (socket.join(roomId)). This groups users together for easier broadcasting later.
+    3. Creates a User object to track state in memory.
+
+* Why it's needed: 
+    1. This establishes the control channel. Without this, the client and server cannot 
+       exchange the necessary data to set up video calls.
+
+
+
+----------------------------> getRouterRtpCapabilities <------------------------------------------
+
+Trigger: Immediately after connection.
+
+What it does:
+  1.ResourcePool.createRoom: Checks if a Mediasoup Router exists for this room. 
+    If not, it picks a Worker (CPU core) and creates a new Router.
+  2.callback(room.rtpCapabilities): The server sends back its "capabilities" 
+    (supported codecs like VP8, H264, Opus).
+
+
+Why it's needed: 
+    1.The client needs to know what codecs the server supports. For example, 
+      if the server only supports VP8 but the client tries to send H264, the video will fail. 
+      The client uses this data to load its own Mediasoup device.
+
+
+
+
+----------------------------> 3. createWebRtcTransport (Building the Highway) <-----------------------------
+
+
+Trigger: Called twice by the client—once for sending media and once for receiving media.
+
+What it does:
+   1. roomRouter.createWebRtcTransport: The server tells the Router to open a new UDP port (a "transport") on the server.
+   2. TransportPool.set: Saves this transport object in memory, linking it to the socket.id.
+   3. Returns Parameters: The server sends back critical networking data:
+        a. iceParameters: Security credentials (username fragment/password) for the connection.
+        b. iceCandidates: The Server's IP address and Port.
+        c. dtlsParameters: The server's security fingerprint (certificate).
+
+Why it's needed:
+   1. This creates the "pipe" through which media will flow. Note that this creates the Server-side endpoint. 
+      The client will use the returned data to create its matching Client-side endpoint.
+
+
+
+
+----------------------------> 4. transport-connect (Security Check / DTLS) <-----------------------------
+
+Trigger: After the client has successfully initialized its own transport.
+
+What it does:
+   1. The client sends its own dtlsParameters (its security fingerprint) to the server.
+   2. transport.connect({ dtlsParameters }): The server inputs the client's fingerprint into the transport created in step 3.
+
+Why it's needed: 
+   1. WebRTC is encrypted by default using DTLS (Datagram Transport Layer Security). 
+      The server and client must exchange fingerprints to verify they are talking to the correct party. 
+      Once this event finishes, the connection is secure.
