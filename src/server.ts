@@ -22,6 +22,22 @@ const io = new Server(httpServer, {
 const connectedUsers = new Map<string, { username: string, roomId: string, socketId: string }>();
 const PORTDIFFERENCE = (config.worker.rtcMaxPort - config.worker.rtcMinPort) + 1;
 
+/*
+producerIdToUserMap helps to find out which user produced a particular producer
+Key: producerId
+Value: { user: User, kind: string }
+
+consumerIdToUserMap helps to find out which user is consuming a particular consumer
+Key: consumerId
+Value: { user: User, kind: string }
+
+roomToProducerIdMap helps to find out all the producers in a particular room
+Key: roomId
+Value: Set of producerIds
+*/
+const producerIdToUserMap = new Map<string, { user: User; kind: string }>();
+const consumerIdToUserMap = new Map<string, { user: User; kind: string }>();
+const roomToProducerIdMap = new Map<string, Set<string>>();
 
 const createWorkerPool = async () => {
   const numWorkers = os.cpus().length;
@@ -79,39 +95,12 @@ io.on('connection', (socket) => {
 
       if(sender){
           // If sender = true, it means client want to create a producerTransport
-
-          const transportData: ProducerTransport = {
-            consumer: !sender,
-            roomId: roomId,
-            socketId: socket.id,
-            transport,
-    
-            audioProducer: null,
-            screenProducer: null,
-            videoProducer: null,
-          };
-          console.log(`${user.name} successfully created Producertransport with id ${transport.id}`)
-          ResourcePool.saveProducerTransport(transport.id, transportData);
-          user.setProducerTransport(transport.id);
-
+          console.log(`${user.name} successfully created Producertransport with id ${transport.id}`)          
+          user.producerTransport = transport;
       } else{
           // If sender = false, it means client want to create a consumerTransport
-
-          const transportData: ConsumerTransport = {
-            consumer: !sender,
-            roomId: roomId,
-            socketId: socket.id,
-            transport,
-    
-            audioConsumer: null,
-            screenConsumer: null,
-            videoConsumer: null,
-          };
-
           console.log(`${user.name} successfully created consumertransport with id ${transport.id}`)
-          ResourcePool.saveConsumerTransport(transport.id, transportData);
-          user.setConsumerTransport(transport.id);
-
+          user.consumerTransport = transport;
       }
 
       callback({
@@ -129,12 +118,11 @@ io.on('connection', (socket) => {
 
   // C. Client sends its dtlsParameters and connect to producer-transport 
   socket.on('producer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
-
     
-    const producerTransport = ResourcePool.getProducerTransort(transportId);
+    const producerTransport = user.producerTransport;
 
     if (producerTransport) {
-      await producerTransport.transport.connect({ dtlsParameters });
+      await producerTransport.connect({ dtlsParameters });
       console.log(`Successfully connected ${user.name}'s client and server side producerTransport`);
       callback();
     } else{
@@ -146,11 +134,10 @@ io.on('connection', (socket) => {
   // C. Client sends its dtlsParameters and connect to consumer-transport
   socket.on('consumer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
 
-    
-      const consumerTransport = ResourcePool.getConsumerTransort(transportId);
+      const consumerTransport = user.consumerTransport;
   
       if (consumerTransport){
-        await consumerTransport.transport.connect({ dtlsParameters });
+        await consumerTransport.connect({ dtlsParameters });
         console.log(`Successfully connected ${user.name}'s client and server side consumerTransport `);
         callback();
       } else{
@@ -162,45 +149,47 @@ io.on('connection', (socket) => {
 
   // D. Client want to create Producer, so that it can send audio or video stream
   socket.on('transport-produce', async ({ kind, rtpParameters, transportId }, callback) => {
+    
+    /*
+     1. Get the producerTransport of the user
+     2. Create a producer inside the transport with given kind and rtpParameters
+     3. Save the producer inside the user object for future use
+     4. Send back the producer id to client
+     5. Client will use this id to create client side producer
+     6. Once client side producer is created, It will send a request to server to inform that producer is ready
+     7. Server will now notify all other clients in the room about new producer 
+    */
 
-    // Client want to create an audio (or video or screen share) producer inside its producerTransport
-    const producerTransport = ResourcePool.getProducerTransort(transportId);
+    const producerTransport = user.producerTransport;
 
     if(!producerTransport){
       console.log("Producer transport does not exist");
       return;
     }
 
-    const producer = await producerTransport.transport.produce({kind, rtpParameters});
-
-    const data: Producer = {
-      producer, 
-      roomId: user.roomId, 
-      transportId, socketId: 
-      socket.id, 
-      username: user.name,
-      associatedConsumers: []
-    }
+    const producer = await producerTransport.produce({kind, rtpParameters});
 
     if(kind === "video"){
-      
-      // save Video Prodcuer
-      ResourcePool.saveVideoProducer(producer.id, data);
-      ResourcePool.updateProducerTransport(transportId, "video", producer.id);
-
-      console.log(`${user.name} created Video Producer with id ${producer.id}`);
+      user.saveProducer("video", producer)
+      console.log(`\n${user.name} created Video Producer with id ${producer.id}`);
       
     } else if(kind === "audio"){
-      
-      // save audio Producer
-      ResourcePool.saveAudioProducer(producer.id, data);
-      ResourcePool.updateProducerTransport(transportId, "audio", producer.id);
-
+      user.saveProducer("audio", producer)
       console.log(`${user.name} created audio Producer with id ${producer.id}`);
       
     } else{
+      // user.saveProducer("screen", producer) 
       console.log("Does not support Screen share transport yet")
     }
+
+    producerIdToUserMap.set(producer.id, {user, kind});
+
+    roomToProducerIdMap.set(user.roomId,  
+      roomToProducerIdMap.get(user.roomId) ?
+        roomToProducerIdMap.get(user.roomId)!.add(producer.id)
+        :
+        new Set<string>([producer.id])
+    )
     
     // Notify others (Include socketId so they know WHO produced)
     
@@ -212,24 +201,40 @@ io.on('connection', (socket) => {
     });
 
 
-    socket.to(producerTransport.roomId).emit('new-producer', {
+    socket.to(user.roomId).emit('new-producer', {
       producerId: producer.id,
-      roomId: producerTransport.roomId,
+      roomId: user.roomId,
       kind,
       socketId: socket.id // Add this
     });
       
+    // setInterval(async()=>{
+    //   const stats = await producer.getStats();
+    //   console.log('Producer Stats:', stats[0].packetCount, " ", stats[0].bitrate);
+    // }, 2000);
     
 
   });
   
   // E. Client want to consumer stream of user 
-  socket.on('consume', async ({ producerId, rtpCapabilities, transportId, roomId, kind }, callback) => {
+  socket.on('consume', async ({ producerId, rtpCapabilities, roomId, kind }, callback) => {
+    console.log("\n consume", user.name)
     /*
     Client want to consume the stream from producer "producerId"
     Client will now create a consumer inside its own consumerTransport
-
+    
+    producerId -> It represent the producer id of the stream they want to consum
     transportId -> It represent the transport id of client's consumerTransport 
+
+    1. Get the router for the room
+    2. Check if the router can consume the stream with given rtpCapabilities
+    3. Get the consumerTransport of the client
+    4. Create a consumer inside the consumerTransport
+    5. Send back the consumer parameters to client
+    6. Client will use these parameters to create client side consumer
+    7. Once client side consumer is created, it will send a request to server to resume the consumer
+    8. Server will resume the consumer
+    9. Client will now receive the stream
     */
 
     try {
@@ -240,7 +245,7 @@ io.on('connection', (socket) => {
         return
       }
     
-      const consumerTransport = ResourcePool.getConsumerTransort(transportId);
+      const consumerTransport = user.consumerTransport;
 
       if(!consumerTransport){
         console.log("Consumer Transport does not exist");
@@ -248,35 +253,36 @@ io.on('connection', (socket) => {
       }
         
       // Create a consumer inside ConsumeTransport
-      const consumer = await consumerTransport.transport.consume({
+      const consumer = await consumerTransport.consume({
         producerId,
         rtpCapabilities,
         paused: true,
       });
-      
-      const data: Consumer = {
-        consumer,
-        roomId: user.roomId,
-        socketId: socket.id,
-        transportId,
-        username: user.name
+
+      console.log("Consumer ", consumer.id);
+
+      const streamingUserInfo = producerIdToUserMap.get(producerId);
+      if(!streamingUserInfo){
+        throw new Error("Streaming user info not found");
       }
 
       if(kind === "video"){
-        ResourcePool.updateConsumerTransport(transportId, "video", consumer.id, data);
-        ResourcePool.updateVideoProducer(producerId, consumer.id);
+        user.saveConsumer("video", consumer);
+        streamingUserInfo.user.videoProducer?.associatedConsumers.push(consumer.id);
         console.log(`${user.name} created Video Consumer with id ${consumer.id}`);
       } 
-      else if(kind === "audio"){             
-        ResourcePool.updateConsumerTransport(transportId, "audio", consumer.id, data);
-        ResourcePool.updateAudioProducer(producerId, consumer.id);
+      else if(kind === "audio"){     
+        user.saveConsumer("audio", consumer);
+        streamingUserInfo.user.audioProducer?.associatedConsumers.push(consumer.id);        
         console.log(`${user.name} created Audio Consumer with id ${consumer.id}`);
       } 
       else{           
-        ResourcePool.updateConsumerTransport(transportId, "screen", consumer.id, data);
-        ResourcePool.updateScreenProducer(producerId, consumer.id);
+        // user.saveConsumer("screen", consumer);
+        streamingUserInfo.user.screenProducer?.associatedConsumers.push(consumer.id);
         console.log(`${user.name} created Video Consumer with id ${consumer.id}`);
       }
+
+      consumerIdToUserMap.set(consumer.id, {user, kind});
 
       consumer.on('transportclose', () => {
          console.log("Consumer transport closed");
@@ -305,10 +311,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('consumer-resume', async ({ serverConsumerId, kind }) => {
+
+    console.log("\n consumer-resume", user.name)
+        
+    const consumer = user.videoConsumer.get(serverConsumerId);
     
-    const consumerTranportId = user.consumerTransport;
+    console.log("Consumer-resume ", consumer, " ", serverConsumerId)
     
-    const consumer = ResourcePool.getConsumer(consumerTranportId, kind, serverConsumerId);
     if (consumer) {
       console.log(`${user.name} resumed ${kind} stream`)
       await consumer.consumer.resume();
@@ -337,78 +346,80 @@ io.on('connection', (socket) => {
      
   });
 
-  socket.on('pause-producer', async ({producerId, producerTransportId, kind})=>{
+  socket.on('pause-producer', async ({ kind })=>{
     // This event will be fire by the user who turn off their camera but they are still in the meeting
     // producerId-> It represent the porducer id of the stream they stop sending
     
     console.log(`Pausing ${kind} stream`);
     
-    const streamProducer = ResourcePool.getProducer(producerId, kind);
+    let streamProducer = null;
+
+    if(kind === "video"){
+      streamProducer = user.videoProducer;
+    } else if(kind === "audio"){
+      streamProducer = user.audioProducer;
+    } else if(kind === "screen"){
+      streamProducer = user.screenProducer;
+    }
+
     
     if(!streamProducer){
       console.log(kind, " stream producer does not exist");
       return;
     }
 
-    const { producer, roomId, socketId } = streamProducer;
-    await producer.pause();
+    await streamProducer.producer.pause();
 
-    socket.to(roomId).emit("remote-producer-paused", {socketId, kind});
+    socket.to(roomId).emit("remote-producer-paused", {socketId: user.socketId, kind});
     
   })
 
-  socket.on("resume-stream", async({producerId, kind})=>{
+  socket.on("resume-stream", async({kind})=>{
     console.log(`Resuming ${kind} stream`);
     
-    const streamProducer = ResourcePool.getProducer(producerId, kind);
+    let streamProducer = null;
+
+    if(kind === "video"){
+      streamProducer = user.videoProducer;
+    } else if(kind === "audio"){
+      streamProducer = user.audioProducer;
+    } else if(kind === "screen"){
+      streamProducer = user.screenProducer;
+    } 
 
     if(!streamProducer){
       console.log(kind, " stream producer does not exist");
       return;
     }
 
-    const {producer, roomId, socketId} = streamProducer;
-    await producer.resume();
-    console.log(`Producer ${producer.id} paused? ${producer.paused}`);
-    // Check if the producer is actually receiving data from User 1
-    const stats = await producer.getStats();
-    console.log('Producer Stats:', stats);
+    await streamProducer.producer.resume();
 
-    socket.to(roomId).emit("remote-stream-resumed", {socketId, kind});
+    streamProducer.associatedConsumers.forEach(async(consumerId)=>{
+      await consumerIdToUserMap.get(consumerId)?.user.videoConsumer.get(consumerId)?.consumer.resume();
+    })
+
+    console.log(`Producer ${streamProducer.producer.id} paused? ${streamProducer.producer.paused}`);
+    // Check if the producer is actually receiving data from User 1
+
+
+    socket.to(roomId).emit("remote-stream-resumed", {socketId: user.socketId, kind});
     
   })
 
 
 
-  // socket.on('getProducers', ({ roomId }, callback) => {
-  //   // Return producer ID AND socket ID
-  //   const existingProducers = producers
-  //       .filter(p => p.roomId === roomId && p.socketId !== socket.id)
-  //       .map(p => ({ producerId: p.producer.id, socketId: p.socketId }));
-    
-  //   callback(existingProducers);
-  // });
+  socket.on('getProducers', ({ roomId }, callback) => {
+    // Return producer ID AND socket ID
+    const existingProducers = roomToProducerIdMap.get(roomId) ?
+      Array.from(roomToProducerIdMap.get(roomId)!) : [];
+    console.log("Existing User ", existingProducers);
+    callback(existingProducers);
+  });
 
   // --- CLEANUP LOGIC ---
   socket.on('disconnect', () => {
     console.log("Disconnecting user:", socket.id);
-    
-    // Notify room that user left (remove tile)
-    if(connectedUsers.has(socket.id)) {
-        const { roomId } = connectedUsers.get(socket.id)!;
-        socket.to(roomId).emit('user-left', { socketId: socket.id });
-        connectedUsers.delete(socket.id);
-    }
 
-    consumers = removeAndClose(consumers, socket.id, 'consumer');
-    producers = removeAndClose(producers, socket.id, 'producer');
-    transports = removeAndClose(transports, socket.id, 'transport');
-
-    for (const [key, value] of TransportPool.entries()) {
-        if (value.socketId === socket.id) {
-            TransportPool.delete(key);
-        }
-    }
   });
 
   const removeAndClose = (items: any[], socketId: string, type: string) => {
@@ -441,10 +452,4 @@ const startUp = async () => {
 
 startUp();
 
-/*
 
-1. As soon our server spins up, We first create n workers (n = no. of cores in the system)
-
-
-
-*/
