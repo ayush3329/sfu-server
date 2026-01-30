@@ -25,8 +25,6 @@ class PoolCollection {
 
     consumerTransport: Map<string, ConsumerTransport>= new Map(); 
 
-
-
     // TransportPool: Map<string, TransportEntry>= new Map(); //It holds all the transport connection
     /*
     {
@@ -157,6 +155,56 @@ class PoolCollection {
 
     saveScreenProducer(screenProducerId: string, data: Producer) {
         this.screenProducer.set(screenProducerId, data);
+    }
+
+    getProducer(producerId: string, kind: "video" | "audio" | "screen"){
+        if(kind === "video")
+            return this.videoProducer.get(producerId);
+        else if(kind === "audio")
+            return this.audioProducer.get(producerId);
+        else 
+            return this.screenProducer.get(producerId);
+    }
+
+    deleteProducer(producerId: string, producerTransportId: string, kind: "audio" | "video" | "screen"){
+        if(kind === "video"){
+            this.videoProducer.delete(producerId);
+            const transport = this.producerTransport.get(producerTransportId);
+            if(!transport) return;
+            transport.videoProducer = null;
+            this.producerTransport.set(producerTransportId, transport);
+        } else if(kind === "audio"){
+            this.audioProducer.delete(producerId);
+            const transport = this.producerTransport.get(producerTransportId);
+            if(!transport) return;
+            transport.audioProducer = null;
+            this.producerTransport.set(producerTransportId, transport);
+        } else{
+            this.screenProducer.delete(producerId);
+            const transport = this.producerTransport.get(producerTransportId);
+            if(!transport) return;
+            transport.screenProducer = null;
+            this.producerTransport.set(producerTransportId, transport);
+        }
+            
+    }
+
+    updateVideoProducer(producerId: string, consumerId: string) {
+        const data = this.videoProducer.get(producerId);
+        if(!data) return;
+        data.associatedConsumers.push(consumerId);
+    }
+
+    updateAudioProducer(producerId: string, consumerId: string) {
+        const data = this.audioProducer.get(producerId);
+        if(!data) return;
+        data.associatedConsumers.push(consumerId);
+    }
+
+    updateScreenProducer(producerId: string, consumerId: string) {
+        const data = this.screenProducer.get(producerId);
+        if(!data) return;
+        data.associatedConsumers.push(consumerId);
     }
 
 

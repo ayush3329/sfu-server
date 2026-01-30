@@ -5,7 +5,7 @@ import config from "./configs/mediaSoup-config";
 import http from "http";
 import os from "os";
 import { WebRtcTransport } from "mediasoup/node/lib/WebRtcTransportTypes";
-import { Consumer, ConsumerTransport, ProducerTransport } from "./Types/types";
+import { Consumer, ConsumerTransport, Producer, ProducerTransport } from "./Types/types";
 import User from "./Utility/User";
 import PoolCollection from "./Utility/Pool";
 
@@ -62,7 +62,7 @@ io.on('connection', (socket) => {
   // A. Client will ask rtpCapability of room
   socket.on('getRouterRtpCapabilities', async ({ roomId }, callback) => {
     try {
-      console.log("getRouterRtpCapabilities");
+      console.log(`${user.name} requested for getRouterRtpCapabilities`);
       const room = await ResourcePool.createRoom(roomId, user);
       callback(room.rtpCapabilities);
     } catch (e: any) {
@@ -90,7 +90,7 @@ io.on('connection', (socket) => {
             screenProducer: null,
             videoProducer: null,
           };
-          console.log(`${user.name} successfully created Producertransport with id ${transport.id}\n`)
+          console.log(`${user.name} successfully created Producertransport with id ${transport.id}`)
           ResourcePool.saveProducerTransport(transport.id, transportData);
           user.setProducerTransport(transport.id);
 
@@ -108,7 +108,7 @@ io.on('connection', (socket) => {
             videoConsumer: null,
           };
 
-          console.log(`${user.name} successfully created consumertransport with id ${transport.id}\n`)
+          console.log(`${user.name} successfully created consumertransport with id ${transport.id}`)
           ResourcePool.saveConsumerTransport(transport.id, transportData);
           user.setConsumerTransport(transport.id);
 
@@ -130,16 +130,15 @@ io.on('connection', (socket) => {
   // C. Client sends its dtlsParameters and connect to producer-transport 
   socket.on('producer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
 
-    console.log(`(producer-transport-connect) ${user.name} sends its dtls Params `, dtlsParameters);
     
     const producerTransport = ResourcePool.getProducerTransort(transportId);
 
     if (producerTransport) {
       await producerTransport.transport.connect({ dtlsParameters });
-      console.log(`Successfully connected ${user.name}'s client Side producerTransport with server side producerTransport with id: `, transportId, "\n\n");
+      console.log(`Successfully connected ${user.name}'s client and server side producerTransport`);
       callback();
     } else{
-      console.log("Failed to connect dtls params");
+      console.log("Failed to connect server and client side producerTransport");
     }
 
   });
@@ -147,16 +146,15 @@ io.on('connection', (socket) => {
   // C. Client sends its dtlsParameters and connect to consumer-transport
   socket.on('consumer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
 
-    console.log(`(consumer-transport-connect) ${user.name} sends its dtls Params `, dtlsParameters);
     
       const consumerTransport = ResourcePool.getConsumerTransort(transportId);
   
       if (consumerTransport){
         await consumerTransport.transport.connect({ dtlsParameters });
-        console.log(`Successfully connected ${user.name}'ss client Side consumerTransport with server side consumerTransport with id: `, transportId, "\n\n");
+        console.log(`Successfully connected ${user.name}'s client and server side consumerTransport `);
         callback();
       } else{
-        console.log("Failed to connect dtls params");
+        console.log("Failed to connect server and client side consumerTransport");
       }
     
 
@@ -175,12 +173,13 @@ io.on('connection', (socket) => {
 
     const producer = await producerTransport.transport.produce({kind, rtpParameters});
 
-    const data = {
+    const data: Producer = {
       producer, 
       roomId: user.roomId, 
       transportId, socketId: 
       socket.id, 
-      username: user.name
+      username: user.name,
+      associatedConsumers: []
     }
 
     if(kind === "video"){
@@ -190,7 +189,6 @@ io.on('connection', (socket) => {
       ResourcePool.updateProducerTransport(transportId, "video", producer.id);
 
       console.log(`${user.name} created Video Producer with id ${producer.id}`);
-      console.log(`packet ssrc -> `, rtpParameters.encodings[0].ssrc, "\n\n");
       
     } else if(kind === "audio"){
       
@@ -199,7 +197,6 @@ io.on('connection', (socket) => {
       ResourcePool.updateProducerTransport(transportId, "audio", producer.id);
 
       console.log(`${user.name} created audio Producer with id ${producer.id}`);
-      console.log(`packet ssrc -> `, rtpParameters.encodings[0].ssrc, "\n\n");
       
     } else{
       console.log("Does not support Screen share transport yet")
@@ -236,15 +233,13 @@ io.on('connection', (socket) => {
     */
 
     try {
-      console.log("Consuming stream of ", producerId)
       const router = await ResourcePool.getRoomRouter(roomId, user);
 
       if(!router.canConsume({producerId, rtpCapabilities})){
         console.log(`Cannot consumer stream of producer ${producerId}`);
         return
       }
-      
-      console.log(`${user.name} can consume stream of `, producerId);
+    
       const consumerTransport = ResourcePool.getConsumerTransort(transportId);
 
       if(!consumerTransport){
@@ -269,14 +264,17 @@ io.on('connection', (socket) => {
 
       if(kind === "video"){
         ResourcePool.updateConsumerTransport(transportId, "video", consumer.id, data);
+        ResourcePool.updateVideoProducer(producerId, consumer.id);
         console.log(`${user.name} created Video Consumer with id ${consumer.id}`);
       } 
       else if(kind === "audio"){             
         ResourcePool.updateConsumerTransport(transportId, "audio", consumer.id, data);
+        ResourcePool.updateAudioProducer(producerId, consumer.id);
         console.log(`${user.name} created Audio Consumer with id ${consumer.id}`);
       } 
       else{           
         ResourcePool.updateConsumerTransport(transportId, "screen", consumer.id, data);
+        ResourcePool.updateScreenProducer(producerId, consumer.id);
         console.log(`${user.name} created Video Consumer with id ${consumer.id}`);
       }
 
@@ -307,31 +305,78 @@ io.on('connection', (socket) => {
   });
 
   socket.on('consumer-resume', async ({ serverConsumerId, kind }) => {
-    console.log("consumer-resume ")
     
     const consumerTranportId = user.consumerTransport;
-
+    
     const consumer = ResourcePool.getConsumer(consumerTranportId, kind, serverConsumerId);
     if (consumer) {
-      console.log("Cosumption started ", consumer);
+      console.log(`${user.name} resumed ${kind} stream`)
       await consumer.consumer.resume();
+    } else{
+      console.log(`Failed to resume ${kind} stream for ${user.name}`)
     }
   });
 
   // NEW: Explicitly close producer when user toggles off camera/mic
-  // socket.on('close-producer', ({ producerId }) => {
-  //    console.log(`Explicitly closing producer: ${producerId}`);
-  //    const producerIndex = producers.findIndex(p => p.producer.id === producerId);
+  socket.on('close-producer', ({ producerId, producerTransportId, kind  }) => {
+     console.log(`Explicitly closing producer: ${producerId}`);
+    //  const producerIndex = producers.findIndex(p => p.producer.id === producerId);
+     const streamProducer = ResourcePool.getProducer(producerId, kind);
+
+     if(!streamProducer){
+      console.log(kind, " producer does not exist");
+      return
+     }
      
-  //    if (producerIndex !== -1) {
-  //        const { producer, roomId, socketId } = producers[producerIndex];
-  //        producer.close();
-  //        producers.splice(producerIndex, 1);
+    const { producer, roomId, socketId, transportId } = streamProducer;
+    producer.close();
+    ResourcePool.deleteProducer(producerId, transportId, kind)    
          
-  //        // Notify clients to stop consuming this specific producer
-  //        socket.to(roomId).emit("producer-closed", { producerId, socketId });
-  //    }
-  // });
+         // Notify clients to stop consuming this specific producer
+    socket.to(roomId).emit("producer-closed", { producerId, socketId, kind });
+     
+  });
+
+  socket.on('pause-producer', async ({producerId, producerTransportId, kind})=>{
+    // This event will be fire by the user who turn off their camera but they are still in the meeting
+    // producerId-> It represent the porducer id of the stream they stop sending
+    
+    console.log(`Pausing ${kind} stream`);
+    
+    const streamProducer = ResourcePool.getProducer(producerId, kind);
+    
+    if(!streamProducer){
+      console.log(kind, " stream producer does not exist");
+      return;
+    }
+
+    const { producer, roomId, socketId } = streamProducer;
+    await producer.pause();
+
+    socket.to(roomId).emit("remote-producer-paused", {socketId, kind});
+    
+  })
+
+  socket.on("resume-stream", async({producerId, kind})=>{
+    console.log(`Resuming ${kind} stream`);
+    
+    const streamProducer = ResourcePool.getProducer(producerId, kind);
+
+    if(!streamProducer){
+      console.log(kind, " stream producer does not exist");
+      return;
+    }
+
+    const {producer, roomId, socketId} = streamProducer;
+    await producer.resume();
+    console.log(`Producer ${producer.id} paused? ${producer.paused}`);
+    // Check if the producer is actually receiving data from User 1
+    const stats = await producer.getStats();
+    console.log('Producer Stats:', stats);
+
+    socket.to(roomId).emit("remote-stream-resumed", {socketId, kind});
+    
+  })
 
 
 
