@@ -5,7 +5,7 @@ class StreamProducer {
     // VideoProducer or AudioProducer or ScreenProducer
     kind: string;
     producer: mediasoup.types.Producer<mediasoup.types.AppData>;
-    associatedConsumers: string[] = [];
+    associatedConsumers: string[] = []; //Every Producer will store the id's of all the consumers who are consuming its stream
 
     constructor(kind: string, producer: mediasoup.types.Producer<mediasoup.types.AppData>) {
         this.kind = kind;
@@ -33,13 +33,16 @@ class User {
     socketId: string; 
     workerIndex: number; //index of worker in which the room is created for this user (will be same for all the user which are in the same meeting)
 
+    // Transports
     producerTransport: WebRtcTransport | null; // transport for sending media to server
     consumerTransport: WebRtcTransport | null; // transport for receiving media from server
 
+    // Producers (Every Producer will store the id's of all the consumers who are consuming its stream)
     videoProducer: StreamProducer | null; // producer for sending video to server
     audioProducer: StreamProducer | null; // producer for sending audio to server
     screenProducer: StreamProducer | null; // producer for sending screen to server
 
+    // Consumers
     videoConsumer: Map<string, StreamConsumer>; // consumers for receiving video from server
     audioConsumer: Map<string, StreamConsumer>; // consumers for receiving audio from server
     screenConsumer: Map<string, StreamConsumer>; // consumers for receiving screen from server

@@ -35,9 +35,10 @@ roomToProducerIdMap helps to find out all the producers in a particular room
 Key: roomId
 Value: Set of producerIds
 */
-const producerIdToUserMap = new Map<string, { user: User; kind: string }>();
-const consumerIdToUserMap = new Map<string, { user: User; kind: string }>();
+const producerIdToUserMap = new Map<string, { user: User; kind: string }>(); 
 const roomToProducerIdMap = new Map<string, Set<string>>();
+const streamProducerType = new Map<string, string>();
+const consumerIdToUserMap = new Map<string, { user: User; kind: string }>();
 
 const createWorkerPool = async () => {
   const numWorkers = os.cpus().length;
@@ -52,7 +53,7 @@ io.on('connection', (socket) => {
 
   const { username, roomId } = socket.handshake.query as { username?: string; roomId?: string; };
   
-  console.log('\nUser connected:', username," ", socket.id, " ", roomId, );
+  console.log('\n User connected:', username, " ", roomId, );
 
   if (!roomId || !username) {
     socket.emit('missing-detail', {
@@ -75,7 +76,6 @@ io.on('connection', (socket) => {
 
   socket.join(roomId);
 
-  // A. Client will ask rtpCapability of room
   socket.on('getRouterRtpCapabilities', async ({ roomId }, callback) => {
     try {
       console.log(`${user.name} requested for getRouterRtpCapabilities`);
@@ -86,8 +86,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  //B. Client emits a request to create server side Transport
-  // We need to differentiate between the producer and consumer transports
+
   socket.on('createWebRtcTransport', async ({ sender, roomId }, callback) => {
     try {
       const roomRouter = await ResourcePool.getRoomRouter(roomId, user);
@@ -116,9 +115,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  // C. Client sends its dtlsParameters and connect to producer-transport 
   socket.on('producer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
-    
+    // Client request to connect client side producer transport with server side producer transport
     const producerTransport = user.producerTransport;
 
     if (producerTransport) {
@@ -126,13 +124,13 @@ io.on('connection', (socket) => {
       console.log(`Successfully connected ${user.name}'s client and server side producerTransport`);
       callback();
     } else{
-      console.log("Failed to connect server and client side producerTransport");
+      console.error("Failed to connect server and client side producerTransport");
     }
 
   });
 
-  // C. Client sends its dtlsParameters and connect to consumer-transport
   socket.on('consumer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
+      // Client request to connect client side producer transport with server side producer transport
 
       const consumerTransport = user.consumerTransport;
   
@@ -141,16 +139,17 @@ io.on('connection', (socket) => {
         console.log(`Successfully connected ${user.name}'s client and server side consumerTransport `);
         callback();
       } else{
-        console.log("Failed to connect server and client side consumerTransport");
+        console.error("Failed to connect server and client side consumerTransport");
       }
     
 
   });
 
-  // D. Client want to create Producer, so that it can send audio or video stream
   socket.on('transport-produce', async ({ kind, rtpParameters, transportId }, callback) => {
     
     /*
+    Client want to create Producer, so that it can send audio or video stream
+        
      1. Get the producerTransport of the user
      2. Create a producer inside the transport with given kind and rtpParameters
      3. Save the producer inside the user object for future use
@@ -158,20 +157,22 @@ io.on('connection', (socket) => {
      5. Client will use this id to create client side producer
      6. Once client side producer is created, It will send a request to server to inform that producer is ready
      7. Server will now notify all other clients in the room about new producer 
+
     */
 
     const producerTransport = user.producerTransport;
 
     if(!producerTransport){
-      console.log("Producer transport does not exist");
+      console.error("Producer transport does not exist");
       return;
     }
 
+    // Creating a producer inside producerTransport of user
     const producer = await producerTransport.produce({kind, rtpParameters});
-
+    
     if(kind === "video"){
       user.saveProducer("video", producer)
-      console.log(`\n${user.name} created Video Producer with id ${producer.id}`);
+      console.log(`${user.name} created Video Producer with id ${producer.id}`);
       
     } else if(kind === "audio"){
       user.saveProducer("audio", producer)
@@ -182,14 +183,27 @@ io.on('connection', (socket) => {
       console.log("Does not support Screen share transport yet")
     }
 
+    streamProducerType.set(producer.id, kind);
+    
     producerIdToUserMap.set(producer.id, {user, kind});
+    // We are storing this information, so that user2 can get access of user1's information (object of User class)
+    // with the help of its "audio-producer-id" or "video-producer-id" or "screen-producer-id"
+    /*
+    {
+      "video-producer-user1": {user: user1, kind: "video"}
+      "audio-producer-user1": {user: user1, kind: "audio"}
+      
+      "video-producer-user2": {user: user2, kind: "video"}
+      "audio-producer-user3": {user: user3, kind: "audio"}
+    }
+    */
 
     roomToProducerIdMap.set(user.roomId,  
       roomToProducerIdMap.get(user.roomId) ?
-        roomToProducerIdMap.get(user.roomId)!.add(producer.id)
-        :
-        new Set<string>([producer.id])
+       roomToProducerIdMap.get(user.roomId)!.add(producer.id) : new Set<string>([producer.id])
     )
+    // We are storing all producer ids of all the user against roomId, so that when a new user joins the meet, we can give 
+    // that user all the producer ids from where it need consume stream 
     
     // Notify others (Include socketId so they know WHO produced)
     
@@ -205,26 +219,23 @@ io.on('connection', (socket) => {
       producerId: producer.id,
       roomId: user.roomId,
       kind,
-      socketId: socket.id // Add this
+      socketId: socket.id 
     });
       
-    // setInterval(async()=>{
-    //   const stats = await producer.getStats();
-    //   console.log('Producer Stats:', stats[0].packetCount, " ", stats[0].bitrate);
-    // }, 2000);
+    setInterval(async()=>{
+      const stats = await producer.getStats();
+      console.log('Producer Stats:', stats[0].packetCount, " ", stats[0].bitrate);
+      // console.log('Producer Stats:', stats);
+    }, 2000);
     
 
   });
   
   // E. Client want to consumer stream of user 
   socket.on('consume', async ({ producerId, rtpCapabilities, roomId, kind }, callback) => {
-    console.log("\n consume", user.name)
+    console.log(`${user.name} want to consume ${kind} stream. producerId: ${producerId}`)
     /*
-    Client want to consume the stream from producer "producerId"
-    Client will now create a consumer inside its own consumerTransport
-    
-    producerId -> It represent the producer id of the stream they want to consum
-    transportId -> It represent the transport id of client's consumerTransport 
+    producerId -> It represent the producer id of the stream they want to consume (other user's stream)
 
     1. Get the router for the room
     2. Check if the router can consume the stream with given rtpCapabilities
@@ -238,17 +249,17 @@ io.on('connection', (socket) => {
     */
 
     try {
-      const router = await ResourcePool.getRoomRouter(roomId, user);
+      const router = await ResourcePool.getRoomRouter(roomId, user); 
 
       if(!router.canConsume({producerId, rtpCapabilities})){
-        console.log(`Cannot consumer stream of producer ${producerId}`);
+        console.error(`Cannot consumer stream of producer ${producerId}`);
         return
       }
     
       const consumerTransport = user.consumerTransport;
 
       if(!consumerTransport){
-        console.log("Consumer Transport does not exist");
+        console.error("Consumer Transport does not exist");
         return
       }
         
@@ -259,30 +270,33 @@ io.on('connection', (socket) => {
         paused: true,
       });
 
-      console.log("Consumer ", consumer.id);
 
       const streamingUserInfo = producerIdToUserMap.get(producerId);
       if(!streamingUserInfo){
         throw new Error("Streaming user info not found");
       }
 
+      console.log(`${user.name} created ${kind} Consumer with id ${consumer.id}`);
+      
       if(kind === "video"){
         user.saveConsumer("video", consumer);
         streamingUserInfo.user.videoProducer?.associatedConsumers.push(consumer.id);
-        console.log(`${user.name} created Video Consumer with id ${consumer.id}`);
       } 
       else if(kind === "audio"){     
         user.saveConsumer("audio", consumer);
         streamingUserInfo.user.audioProducer?.associatedConsumers.push(consumer.id);        
-        console.log(`${user.name} created Audio Consumer with id ${consumer.id}`);
       } 
       else{           
         // user.saveConsumer("screen", consumer);
         streamingUserInfo.user.screenProducer?.associatedConsumers.push(consumer.id);
-        console.log(`${user.name} created Video Consumer with id ${consumer.id}`);
       }
 
       consumerIdToUserMap.set(consumer.id, {user, kind});
+
+      /*
+        we are storing user's info against their consumer id because when any user will resume its stream then they will use
+        resume stream of all the consumer associated to that stream 
+      */
 
       consumer.on('transportclose', () => {
          console.log("Consumer transport closed");
@@ -312,17 +326,22 @@ io.on('connection', (socket) => {
 
   socket.on('consumer-resume', async ({ serverConsumerId, kind }) => {
 
-    console.log("\n consumer-resume", user.name)
+    console.log("Stream Resume requested by ", user.name)
         
     const consumer = user.videoConsumer.get(serverConsumerId);
     
-    console.log("Consumer-resume ", consumer, " ", serverConsumerId)
+    if(!consumer){
+      console.error(`${kind} Consumer with ${serverConsumerId} id does not exist`);
+      return;
+    }
+
+    console.log(consumer?.consumer.id, " ", serverConsumerId)
     
     if (consumer) {
       console.log(`${user.name} resumed ${kind} stream`)
       await consumer.consumer.resume();
     } else{
-      console.log(`Failed to resume ${kind} stream for ${user.name}`)
+      console.error(`Failed to resume ${kind} stream for ${user.name}`)
     }
   });
 
@@ -410,33 +429,99 @@ io.on('connection', (socket) => {
 
   socket.on('getProducers', ({ roomId }, callback) => {
     // Return producer ID AND socket ID
-    const existingProducers = roomToProducerIdMap.get(roomId) ?
-      Array.from(roomToProducerIdMap.get(roomId)!) : [];
-    console.log("Existing User ", existingProducers);
-    callback(existingProducers);
+    const allProducersId = roomToProducerIdMap.get(roomId) ? Array.from(roomToProducerIdMap.get(roomId)!) : [];
+    const data = allProducersId.map((id)=>{
+      return {
+        producerId: id,
+        kind: streamProducerType.get(id),
+        socketId: producerIdToUserMap.get(id)?.user.socketId,
+        username: producerIdToUserMap.get(id)?.user.name
+      }
+    })
+    console.log("Existing User ", data);
+    callback(data);
   });
 
   // --- CLEANUP LOGIC ---
   socket.on('disconnect', () => {
     console.log("Disconnecting user:", socket.id);
-
+    closeConnection();
   });
 
-  const removeAndClose = (items: any[], socketId: string, type: string) => {
-     const [toClose, keep] = items.reduce((result, item) => {
-        result[item.socketId === socketId ? 0 : 1].push(item);
-        return result;
-     }, [[], []]);
+  const closeConnection = () => {
+    console.log(`Starting cleanup for user: ${user.name} (${socket.id})`);
 
-     toClose.forEach((item: any) => {
-         try {
-             item[type].close(); 
-             console.log(`Closed ${type}: ${item[type].id}`);
-         } catch(e) { console.error(`Error closing ${type}`, e); }
-     });
+    // 1. Identify all producers owned by this user
+    // We collect the wrapper objects if they exist
+    const userProducers = [
+      user.videoProducer,
+      user.audioProducer,
+      user.screenProducer
+    ];
 
-     return keep;
+    // 2. Clean up Producer Maps
+    // We iterate through the user's producers to remove them from global tracking maps
+    const roomProducerSet = roomToProducerIdMap.get(roomId);
+
+    userProducers.forEach((producerWrapper) => {
+      if (producerWrapper) {
+        const producerId = producerWrapper.producer.id;
+
+        // Remove from producer -> user map
+        producerIdToUserMap.delete(producerId);
+
+        // Remove from producer -> kind map
+        streamProducerType.delete(producerId);
+
+        // Remove from the Room's Set of producers
+        if (roomProducerSet) {
+          roomProducerSet.delete(producerId);
+        }
+      }
+    });
+
+    // If the room is now empty of producers, we can optionally clean the room key
+    if (roomProducerSet && roomProducerSet.size === 0) {
+      roomToProducerIdMap.delete(roomId);
+    }
+
+    // 3. Clean up Consumer Maps
+    // We need to look at every consumer this user has and remove it from the global map
+    // Assuming videoConsumer/audioConsumer are Maps based on your usage: user.videoConsumer.get(...)
+    const userConsumerMaps = [user.videoConsumer, user.audioConsumer]; // Add screenConsumer if you implement it later
+
+    userConsumerMaps.forEach((consumerMap) => {
+      if (consumerMap) {
+        consumerMap.forEach((consumerWrapper) => {
+          consumerIdToUserMap.delete(consumerWrapper.consumer.id);
+        });
+      }
+    });
+
+    // 4. Close Mediasoup Transports
+    // This is the most critical step. Closing the transport automatically closes 
+    // all producers and consumers associated with it on the mediasoup C++ side.
+    try {
+      if (user.producerTransport) user.producerTransport.close();
+      if (user.consumerTransport) user.consumerTransport.close();
+    } catch (error) {
+      console.error(`Error closing transports for ${user.name}:`, error);
+    }
+
+    // 5. Remove from Connected Users Map
+    connectedUsers.delete(socket.id);
+
+    // 6. Notify the room
+    // Notify others that the user has left so they can update their UI (remove name from list, etc.)
+    socket.to(roomId).emit('user-left', { socketId: socket.id, username: user.name });
+
+    // 7. Leave the Socket.io room
+    socket.leave(roomId);
+
+    console.log(`Cleanup complete for ${user.name}`);
   };
+
+ 
 });
 
 const startUp = async () => {
@@ -451,5 +536,3 @@ const startUp = async () => {
 };
 
 startUp();
-
-
