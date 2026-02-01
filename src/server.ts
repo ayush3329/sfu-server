@@ -1,538 +1,274 @@
-import * as mediasoup from "mediasoup";
-import express from "express";
-import { Server } from "socket.io";
-import config from "./configs/mediaSoup-config";
-import http from "http";
-import os from "os";
-import { WebRtcTransport } from "mediasoup/node/lib/WebRtcTransportTypes";
-import { Consumer, ConsumerTransport, Producer, ProducerTransport } from "./Types/types";
-import User from "./Utility/User";
-import PoolCollection from "./Utility/Pool";
+import express from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import { RoomManager } from './lib/RoomManager';
+import  config  from './configs/mediaSoup-config';
 
-const ResourcePool = new PoolCollection();
 const app = express();
-const httpServer = http.createServer(app);
-
+const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
+const roomManager = new RoomManager();
 
-// Track Connected Users: SocketId -> User Info
-const connectedUsers = new Map<string, { username: string, roomId: string, socketId: string }>();
-const PORTDIFFERENCE = (config.worker.rtcMaxPort - config.worker.rtcMinPort) + 1;
+const startServer = async()=>{
+  try{
+    await roomManager.initialize();
+    httpServer.listen(3000, () => {
+            console.log(`Mediasoup Server running on port ${3000}`);
+    });
+  } catch(err){
 
-/*
-producerIdToUserMap helps to find out which user produced a particular producer
-Key: producerId
-Value: { user: User, kind: string }
-
-consumerIdToUserMap helps to find out which user is consuming a particular consumer
-Key: consumerId
-Value: { user: User, kind: string }
-
-roomToProducerIdMap helps to find out all the producers in a particular room
-Key: roomId
-Value: Set of producerIds
-*/
-const producerIdToUserMap = new Map<string, { user: User; kind: string }>(); 
-const roomToProducerIdMap = new Map<string, Set<string>>();
-const streamProducerType = new Map<string, string>();
-const consumerIdToUserMap = new Map<string, { user: User; kind: string }>();
-
-const createWorkerPool = async () => {
-  const numWorkers = os.cpus().length;
-  for (let i = 0; i < numWorkers; i++) {
-    const minPort = Number(config.worker.rtcMinPort) + (i * PORTDIFFERENCE);
-    const maxPort = Number(config.worker.rtcMaxPort) + (i * PORTDIFFERENCE);
-    await ResourcePool.spawnNewWorker(i, minPort, maxPort);
   }
-};
+}
+
 
 io.on('connection', (socket) => {
+    const { roomId, username } = socket.handshake.query as { roomId: string, username: string };
 
-  const { username, roomId } = socket.handshake.query as { username?: string; roomId?: string; };
-  
-  console.log('\n User connected:', username, " ", roomId, );
-
-  if (!roomId || !username) {
-    socket.emit('missing-detail', {
-      message: "Username or roomId is missing"
-    })
-    return;
-  }
-
-  const user = new User(username, roomId, socket.id);
-  
-  // 1. Add to User Map and Notify Room
-  connectedUsers.set(socket.id, { username, roomId, socketId: socket.id });
-
-  // 2. Send list of existing users to the new client
-  const usersInRoom = Array.from(connectedUsers.values()).filter(u => u.roomId === roomId && u.socketId !== socket.id);
-  socket.emit('all-users', usersInRoom);
-
-  // 3. Notify others that a new user joined (Peer, not just producer)
-  socket.to(roomId).emit('user-joined', { socketId: socket.id, username });
-
-  socket.join(roomId);
-
-  socket.on('getRouterRtpCapabilities', async ({ roomId }, callback) => {
-    try {
-      console.log(`${user.name} requested for getRouterRtpCapabilities`);
-      const room = await ResourcePool.createRoom(roomId, user);
-      callback(room.rtpCapabilities);
-    } catch (e: any) {
-      callback({ error: e.message });
-    }
-  });
-
-
-  socket.on('createWebRtcTransport', async ({ sender, roomId }, callback) => {
-    try {
-      const roomRouter = await ResourcePool.getRoomRouter(roomId, user);
-      const transport: WebRtcTransport = await roomRouter.createWebRtcTransport(config.webRtcTransport);
-
-      if(sender){
-          // If sender = true, it means client want to create a producerTransport
-          console.log(`${user.name} successfully created Producertransport with id ${transport.id}`)          
-          user.producerTransport = transport;
-      } else{
-          // If sender = false, it means client want to create a consumerTransport
-          console.log(`${user.name} successfully created consumertransport with id ${transport.id}`)
-          user.consumerTransport = transport;
-      }
-
-      callback({
-        params: {
-          id: transport.id,
-          iceParameters: transport.iceParameters,
-          iceCandidates: transport.iceCandidates,
-          dtlsParameters: transport.dtlsParameters,
-        }
-      });
-    } catch (error: any) {
-      callback({ error: error.message });
-    }
-  });
-
-  socket.on('producer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
-    // Client request to connect client side producer transport with server side producer transport
-    const producerTransport = user.producerTransport;
-
-    if (producerTransport) {
-      await producerTransport.connect({ dtlsParameters });
-      console.log(`Successfully connected ${user.name}'s client and server side producerTransport`);
-      callback();
-    } else{
-      console.error("Failed to connect server and client side producerTransport");
+    if (!roomId || !username) {
+        socket.emit('missing-detail', { message: "Username or roomId is missing" });
+        socket.disconnect();
+        return;
     }
 
-  });
+    console.log(`User connected: ${username} (${socket.id}) in room ${roomId}`);
 
-  socket.on('consumer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
-      // Client request to connect client side producer transport with server side producer transport
-
-      const consumerTransport = user.consumerTransport;
-  
-      if (consumerTransport){
-        await consumerTransport.connect({ dtlsParameters });
-        console.log(`Successfully connected ${user.name}'s client and server side consumerTransport `);
-        callback();
-      } else{
-        console.error("Failed to connect server and client side consumerTransport");
-      }
-    
-
-  });
-
-  socket.on('transport-produce', async ({ kind, rtpParameters, transportId }, callback) => {
-    
-    /*
-    Client want to create Producer, so that it can send audio or video stream
+    // Initialize User in Room
+    // Using self-executing async function to handle the join logic smoothly
+    (async () => {
+        const { room, peer } = await roomManager.joinRoom(roomId, socket.id, username);
+        //room -> Object of Room class. It holds all necessary information of a meeting Room. Like, all peers
+        // peer -> Object of Peer class. It holds all necessary information about a single (current) user.
         
-     1. Get the producerTransport of the user
-     2. Create a producer inside the transport with given kind and rtpParameters
-     3. Save the producer inside the user object for future use
-     4. Send back the producer id to client
-     5. Client will use this id to create client side producer
-     6. Once client side producer is created, It will send a request to server to inform that producer is ready
-     7. Server will now notify all other clients in the room about new producer 
+        socket.join(roomId);
 
-    */
-
-    const producerTransport = user.producerTransport;
-
-    if(!producerTransport){
-      console.error("Producer transport does not exist");
-      return;
-    }
-
-    // Creating a producer inside producerTransport of user
-    const producer = await producerTransport.produce({kind, rtpParameters});
-    
-    if(kind === "video"){
-      user.saveProducer("video", producer)
-      console.log(`${user.name} created Video Producer with id ${producer.id}`);
-      
-    } else if(kind === "audio"){
-      user.saveProducer("audio", producer)
-      console.log(`${user.name} created audio Producer with id ${producer.id}`);
-      
-    } else{
-      // user.saveProducer("screen", producer) 
-      console.log("Does not support Screen share transport yet")
-    }
-
-    streamProducerType.set(producer.id, kind);
-    
-    producerIdToUserMap.set(producer.id, {user, kind});
-    // We are storing this information, so that user2 can get access of user1's information (object of User class)
-    // with the help of its "audio-producer-id" or "video-producer-id" or "screen-producer-id"
-    /*
-    {
-      "video-producer-user1": {user: user1, kind: "video"}
-      "audio-producer-user1": {user: user1, kind: "audio"}
-      
-      "video-producer-user2": {user: user2, kind: "video"}
-      "audio-producer-user3": {user: user3, kind: "audio"}
-    }
-    */
-
-    roomToProducerIdMap.set(user.roomId,  
-      roomToProducerIdMap.get(user.roomId) ?
-       roomToProducerIdMap.get(user.roomId)!.add(producer.id) : new Set<string>([producer.id])
-    )
-    // We are storing all producer ids of all the user against roomId, so that when a new user joins the meet, we can give 
-    // that user all the producer ids from where it need consume stream 
-    
-    // Notify others (Include socketId so they know WHO produced)
-    
-    callback({ id: producer.id, kind });
-
-    producer.on('transportclose', () => {
-      console.log('Video Producer transport closed');
-      producer.close();
-    });
-
-
-    socket.to(user.roomId).emit('new-producer', {
-      producerId: producer.id,
-      roomId: user.roomId,
-      kind,
-      socketId: socket.id 
-    });
-      
-    setInterval(async()=>{
-      const stats = await producer.getStats();
-      console.log('Producer Stats:', stats[0].packetCount, " ", stats[0].bitrate);
-      // console.log('Producer Stats:', stats);
-    }, 2000);
-    
-
-  });
-  
-  // E. Client want to consumer stream of user 
-  socket.on('consume', async ({ producerId, rtpCapabilities, roomId, kind }, callback) => {
-    console.log(`${user.name} want to consume ${kind} stream. producerId: ${producerId}`)
-    /*
-    producerId -> It represent the producer id of the stream they want to consume (other user's stream)
-
-    1. Get the router for the room
-    2. Check if the router can consume the stream with given rtpCapabilities
-    3. Get the consumerTransport of the client
-    4. Create a consumer inside the consumerTransport
-    5. Send back the consumer parameters to client
-    6. Client will use these parameters to create client side consumer
-    7. Once client side consumer is created, it will send a request to server to resume the consumer
-    8. Server will resume the consumer
-    9. Client will now receive the stream
-    */
-
-    try {
-      const router = await ResourcePool.getRoomRouter(roomId, user); 
-
-      if(!router.canConsume({producerId, rtpCapabilities})){
-        console.error(`Cannot consumer stream of producer ${producerId}`);
-        return
-      }
-    
-      const consumerTransport = user.consumerTransport;
-
-      if(!consumerTransport){
-        console.error("Consumer Transport does not exist");
-        return
-      }
+        // 1. Send list of existing users (Event: 'all-users')
+        const usersInRoom = Array.from(room.peers.values())
+            .filter(p => p.id !== socket.id)
+            .map(p => ({ username: p.name, roomId: room.id, socketId: p.id }));
         
-      // Create a consumer inside ConsumeTransport
-      const consumer = await consumerTransport.consume({
-        producerId,
-        rtpCapabilities,
-        paused: true,
-      });
+        socket.emit('all-users', usersInRoom);
+
+        // 2. Notify others (Event: 'user-joined')
+        socket.to(roomId).emit('user-joined', { socketId: socket.id, username });
 
 
-      const streamingUserInfo = producerIdToUserMap.get(producerId);
-      if(!streamingUserInfo){
-        throw new Error("Streaming user info not found");
-      }
-
-      console.log(`${user.name} created ${kind} Consumer with id ${consumer.id}`);
-      
-      if(kind === "video"){
-        user.saveConsumer("video", consumer);
-        streamingUserInfo.user.videoProducer?.associatedConsumers.push(consumer.id);
-      } 
-      else if(kind === "audio"){     
-        user.saveConsumer("audio", consumer);
-        streamingUserInfo.user.audioProducer?.associatedConsumers.push(consumer.id);        
-      } 
-      else{           
-        // user.saveConsumer("screen", consumer);
-        streamingUserInfo.user.screenProducer?.associatedConsumers.push(consumer.id);
-      }
-
-      consumerIdToUserMap.set(consumer.id, {user, kind});
-
-      /*
-        we are storing user's info against their consumer id because when any user will resume its stream then they will use
-        resume stream of all the consumer associated to that stream 
-      */
-
-      consumer.on('transportclose', () => {
-         console.log("Consumer transport closed");
-         consumer.close();
-      });
-
-      consumer.on('producerclose', () => {
-         console.log("Associated producer closed, closing consumer");
-         socket.emit("producer-closed", { producerId }); 
-         consumer.close();
-        //  consumers = consumers.filter(c => c.consumer.id !== consumer.id);
-      });
-
-      callback({
-        params: {
-          id: consumer.id,
-          producerId: producerId,
-          kind: consumer.kind,
-          rtpParameters: consumer.rtpParameters,
-        }
-      });
-        
-    } catch (error: any) {
-      callback({ error: error.message });
-    }
-  });
-
-  socket.on('consumer-resume', async ({ serverConsumerId, kind }) => {
-
-    console.log("Stream Resume requested by ", user.name)
-        
-    const consumer = user.videoConsumer.get(serverConsumerId);
-    
-    if(!consumer){
-      console.error(`${kind} Consumer with ${serverConsumerId} id does not exist`);
-      return;
-    }
-
-    console.log(consumer?.consumer.id, " ", serverConsumerId)
-    
-    if (consumer) {
-      console.log(`${user.name} resumed ${kind} stream`)
-      await consumer.consumer.resume();
-    } else{
-      console.error(`Failed to resume ${kind} stream for ${user.name}`)
-    }
-  });
-
-  // NEW: Explicitly close producer when user toggles off camera/mic
-  socket.on('close-producer', ({ producerId, producerTransportId, kind  }) => {
-     console.log(`Explicitly closing producer: ${producerId}`);
-    //  const producerIndex = producers.findIndex(p => p.producer.id === producerId);
-     const streamProducer = ResourcePool.getProducer(producerId, kind);
-
-     if(!streamProducer){
-      console.log(kind, " producer does not exist");
-      return
-     }
-     
-    const { producer, roomId, socketId, transportId } = streamProducer;
-    producer.close();
-    ResourcePool.deleteProducer(producerId, transportId, kind)    
-         
-         // Notify clients to stop consuming this specific producer
-    socket.to(roomId).emit("producer-closed", { producerId, socketId, kind });
-     
-  });
-
-  socket.on('pause-producer', async ({ kind })=>{
-    // This event will be fire by the user who turn off their camera but they are still in the meeting
-    // producerId-> It represent the porducer id of the stream they stop sending
-    
-    console.log(`Pausing ${kind} stream`);
-    
-    let streamProducer = null;
-
-    if(kind === "video"){
-      streamProducer = user.videoProducer;
-    } else if(kind === "audio"){
-      streamProducer = user.audioProducer;
-    } else if(kind === "screen"){
-      streamProducer = user.screenProducer;
-    }
-
-    
-    if(!streamProducer){
-      console.log(kind, " stream producer does not exist");
-      return;
-    }
-
-    await streamProducer.producer.pause();
-
-    socket.to(roomId).emit("remote-producer-paused", {socketId: user.socketId, kind});
-    
-  })
-
-  socket.on("resume-stream", async({kind})=>{
-    console.log(`Resuming ${kind} stream`);
-    
-    let streamProducer = null;
-
-    if(kind === "video"){
-      streamProducer = user.videoProducer;
-    } else if(kind === "audio"){
-      streamProducer = user.audioProducer;
-    } else if(kind === "screen"){
-      streamProducer = user.screenProducer;
-    } 
-
-    if(!streamProducer){
-      console.log(kind, " stream producer does not exist");
-      return;
-    }
-
-    await streamProducer.producer.resume();
-
-    streamProducer.associatedConsumers.forEach(async(consumerId)=>{
-      await consumerIdToUserMap.get(consumerId)?.user.videoConsumer.get(consumerId)?.consumer.resume();
-    })
-
-    console.log(`Producer ${streamProducer.producer.id} paused? ${streamProducer.producer.paused}`);
-    // Check if the producer is actually receiving data from User 1
-
-
-    socket.to(roomId).emit("remote-stream-resumed", {socketId: user.socketId, kind});
-    
-  })
-
-
-
-  socket.on('getProducers', ({ roomId }, callback) => {
-    // Return producer ID AND socket ID
-    const allProducersId = roomToProducerIdMap.get(roomId) ? Array.from(roomToProducerIdMap.get(roomId)!) : [];
-    const data = allProducersId.map((id)=>{
-      return {
-        producerId: id,
-        kind: streamProducerType.get(id),
-        socketId: producerIdToUserMap.get(id)?.user.socketId,
-        username: producerIdToUserMap.get(id)?.user.name
-      }
-    })
-    console.log("Existing User ", data);
-    callback(data);
-  });
-
-  // --- CLEANUP LOGIC ---
-  socket.on('disconnect', () => {
-    console.log("Disconnecting user:", socket.id);
-    closeConnection();
-  });
-
-  const closeConnection = () => {
-    console.log(`Starting cleanup for user: ${user.name} (${socket.id})`);
-
-    // 1. Identify all producers owned by this user
-    // We collect the wrapper objects if they exist
-    const userProducers = [
-      user.videoProducer,
-      user.audioProducer,
-      user.screenProducer
-    ];
-
-    // 2. Clean up Producer Maps
-    // We iterate through the user's producers to remove them from global tracking maps
-    const roomProducerSet = roomToProducerIdMap.get(roomId);
-
-    userProducers.forEach((producerWrapper) => {
-      if (producerWrapper) {
-        const producerId = producerWrapper.producer.id;
-
-        // Remove from producer -> user map
-        producerIdToUserMap.delete(producerId);
-
-        // Remove from producer -> kind map
-        streamProducerType.delete(producerId);
-
-        // Remove from the Room's Set of producers
-        if (roomProducerSet) {
-          roomProducerSet.delete(producerId);
-        }
-      }
-    });
-
-    // If the room is now empty of producers, we can optionally clean the room key
-    if (roomProducerSet && roomProducerSet.size === 0) {
-      roomToProducerIdMap.delete(roomId);
-    }
-
-    // 3. Clean up Consumer Maps
-    // We need to look at every consumer this user has and remove it from the global map
-    // Assuming videoConsumer/audioConsumer are Maps based on your usage: user.videoConsumer.get(...)
-    const userConsumerMaps = [user.videoConsumer, user.audioConsumer]; // Add screenConsumer if you implement it later
-
-    userConsumerMaps.forEach((consumerMap) => {
-      if (consumerMap) {
-        consumerMap.forEach((consumerWrapper) => {
-          consumerIdToUserMap.delete(consumerWrapper.consumer.id);
+        // --- EVENT 1: getRouterRtpCapabilities ---
+        socket.on('getRouterRtpCapabilities', ({}, callback) => {
+            try {
+                console.log(`${peer.name} requested getRouterRtpCapabilities`);
+                // The room logic handles the router retrieval
+                const capabilities = room.getRtpCapabilities();
+                callback(capabilities);
+            } catch (e: any) {
+                callback({ error: e.message });
+            }
         });
-      }
-    });
 
-    // 4. Close Mediasoup Transports
-    // This is the most critical step. Closing the transport automatically closes 
-    // all producers and consumers associated with it on the mediasoup C++ side.
-    try {
-      if (user.producerTransport) user.producerTransport.close();
-      if (user.consumerTransport) user.consumerTransport.close();
-    } catch (error) {
-      console.error(`Error closing transports for ${user.name}:`, error);
-    }
+        // --- EVENT 2: createWebRtcTransport ---
+        socket.on('createWebRtcTransport', async ({ sender }, callback) => {
+            try {
+                // Room handles transport creation logic
+                const { params, transport } = await room.createWebRtcTransport(socket.id);
+                // User needs to know if this is producer or consumer transport? 
+                // In your old code you stored them in specific variables. 
+                // In Peer class, we just store them in a map, but we can log it.
+                console.log(`${peer.name} created ${sender ? 'Producer' : 'Consumer'} transport ${params.id}`);
+                callback({ params });
+            } catch (e: any) {
+                callback({ error: e.message });
+            }
+        });
 
-    // 5. Remove from Connected Users Map
-    connectedUsers.delete(socket.id);
+        // --- EVENT 3: producer-transport-connect ---
+        socket.on('producer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
+            const transport = peer.getTransport(transportId);
+            if (transport) {
+                await transport.connect({ dtlsParameters });
+                console.log(`Producer Transport connected for ${peer.name}`);
+                callback();
+            } else {
+                console.error("Producer transport not found");
+            }
+        });
 
-    // 6. Notify the room
-    // Notify others that the user has left so they can update their UI (remove name from list, etc.)
-    socket.to(roomId).emit('user-left', { socketId: socket.id, username: user.name });
+        // --- EVENT 4: consumer-transport-connect ---
+        socket.on('consumer-transport-connect', async ({ dtlsParameters, transportId }, callback) => {
+            const transport = peer.getTransport(transportId);
+            if (transport) {
+                await transport.connect({ dtlsParameters });
+                console.log(`Consumer Transport connected for ${peer.name}`);
+                callback();
+            } else {
+                console.error("Consumer transport not found");
+            }
+        });
 
-    // 7. Leave the Socket.io room
-    socket.leave(roomId);
+        // --- EVENT 5: transport-produce ---
+        socket.on('transport-produce', async ({ kind, rtpParameters, transportId }, callback) => {
+            const transport = peer.getTransport(transportId);
+            if (!transport) return callback({ error: "Transport not found" });
 
-    console.log(`Cleanup complete for ${user.name}`);
-  };
+            try {
+                const producer = await transport.produce({ kind, rtpParameters });
+                
+                peer.addProducer(producer, kind);
+                
+                // Save the kind mapping in the peer (if needed for later lookups)
+                // The Peer class handles the storage logic.
 
- 
+                console.log(`${peer.name} produced ${kind} with id ${producer.id}`);
+
+                // Notify Room
+                socket.to(roomId).emit('new-producer', {
+                    producerId: producer.id,
+                    kind,
+                    socketId: socket.id,
+                    username: peer.name
+                });
+
+                producer.on('@close', () => {
+                    console.log('Producer transport closed');
+                    producer.close();
+                });
+                
+                // Fix for the interval memory leak:
+                if(kind === "audio"){
+                    const statsInterval = setInterval(async () => {
+                            if(producer.closed) {
+                                clearInterval(statsInterval);
+                                return;
+                            }
+                            const stats = await producer.getStats();
+                            console.log("Stats:", stats[0].bitrate);
+                    }, 2000);
+                }
+                callback({ id: producer.id, kind });
+
+            } catch (e: any) {
+                callback({ error: e.message });
+            }
+        });
+
+        // --- EVENT 6: consume ---
+        socket.on('consume', async ({ producerId, rtpCapabilities, kind, consumerTransportId }, callback) => {
+            console.log(`${peer.name} wants to consume ${kind}`);
+
+            try {
+                // 1. Find producer (Using Room instead of Global Map)
+                const remoteProducer = room.findProducer(producerId);
+                if (!remoteProducer) return callback({ error: "Producer not found" });
+
+                // 2. Check capabilities
+                if (!room.router.canConsume({ producerId, rtpCapabilities })) {
+                    return callback({ error: "Cannot consume" });
+                }
+
+                // 3. Get Consumer Transport (In new design, we just find the transport you created earlier)
+                // Note: You usually need to pass transportId from client, but if you only have one consumer transport
+                // per user, we can find it. For safety, let's assume the client passes `transportId` OR 
+                // we find the first transport that isn't producing.
+                // **Improvement**: Your client SHOULD send transportId here. 
+                // If not, we have to iterate peer transports.
+                let consumerTransport = peer.getTransport(consumerTransportId); 
+                
+                if (!consumerTransport) return callback({ error: "Consumer transport not found" });
+
+                const consumer = await consumerTransport.consume({
+                    producerId: remoteProducer.id,
+                    rtpCapabilities,
+                    paused: true,
+                });
+
+                peer.addConsumer(consumer, kind);
+                
+                console.log(`${peer.name} consuming ${kind} (id: ${consumer.id})`);
+
+                consumer.on('@close', () => {
+                    socket.emit("producer-closed", { producerId });
+                    consumer.close();
+                    peer.consumers.delete(consumer.id);
+                });
+
+                callback({
+                    params: {
+                        id: consumer.id,
+                        producerId,
+                        kind: consumer.kind,
+                        rtpParameters: consumer.rtpParameters,
+                    }
+                });
+
+            } catch (e: any) {
+                callback({ error: e.message });
+            }
+        });
+
+        // --- EVENT 7: consumer-resume ---
+        socket.on('consumer-resume', async ({ serverConsumerId, kind }) => {
+            const consumer = peer.getConsumer(serverConsumerId);
+            if (consumer) {
+                await consumer.resume();
+                console.log(`${peer.name} resumed ${kind}`);
+            }
+        });
+
+        // --- EVENT 8: close-producer (Explicit Close) ---
+        socket.on('close-producer', ({ producerId, kind }) => {
+            const producer = peer.getProducer(producerId);
+            if (producer) {
+                producer.close();
+                peer.producers.delete(producerId); // Explicit cleanup
+                
+                // Notify Room
+                socket.to(roomId).emit("producer-closed", { producerId, socketId: socket.id, kind });
+                console.log(`Closed producer ${producerId}`);
+            }
+        });
+
+        // --- EVENT 9: pause-producer ---
+        socket.on('pause-producer', async ({ kind }) => {
+            // Your original code paused based on 'kind'.
+            // We need to find the producer of that kind.
+            const producer = Array.from(peer.producers.values()).find(p => p.kind === kind);
+            
+            if (producer) {
+                await producer.producer.pause();
+                socket.to(roomId).emit("remote-producer-paused", { socketId: socket.id, kind });
+                console.log(`Paused ${kind} stream`);
+            }
+        });
+
+        // --- EVENT 10: resume-stream (Producer Resume) ---
+        socket.on('resume-stream', async ({ kind }) => {
+            const producer = Array.from(peer.producers.values()).find(p => p.kind === kind);
+            
+            if (producer) {
+                await producer.producer.resume();
+                socket.to(roomId).emit("remote-stream-resumed", { socketId: socket.id, kind });
+                console.log(`Resumed ${kind} stream`);
+            }
+        });
+
+        // --- EVENT 11: getProducers ---
+        socket.on('getProducers', ({ roomId }, callback) => {
+            // Logic moved to Room class helper
+            const producerList = room.getProducerListForPeer(socket.id);
+            console.log("Sending existing producers", producerList.length);
+            callback(producerList);
+        });
+
+        // --- EVENT 12: Disconnect ---
+        socket.on('disconnect', () => {
+            console.log(`Disconnecting: ${username}`);
+            roomManager.leaveRoom(roomId, socket.id); // Handles all cleanup logic
+            socket.to(roomId).emit('user-left', { socketId: socket.id, username });
+        });
+
+    })(); // End async init
 });
 
-const startUp = async () => {
-  try {
-    await createWorkerPool();
-    httpServer.listen(3000, () => {
-      console.log('Mediasoup Server running on port 3000');
-    });
-  } catch (err) {
-    console.error("Failed to start server:", err);
-  }
-};
+startServer();
 
-startUp();

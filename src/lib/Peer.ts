@@ -4,8 +4,9 @@ export class Peer {
     public id: string; // Socket ID
     public name: string;
     public transports = new Map<string, WebRtcTransport>();
-    public producers = new Map<string, Producer>();
-    public consumers = new Map<string, Consumer>();
+
+    public producers = new Map<string, {producer: Producer, kind: string}>();
+    public consumers = new Map<string, {consumer: Consumer, kind: string}>();
 
     constructor(socketId: string, name: string) {
         this.id = socketId;
@@ -14,36 +15,39 @@ export class Peer {
 
     addTransport(transport: WebRtcTransport) {
         this.transports.set(transport.id, transport);
-        
-        // Sr. Engineer Tip: specific listeners for cleanup
-        transport.on('dtlsstatechange', (dtlsState) => {
-            if (dtlsState === 'closed') transport.close();
-        });
-        
+
         transport.on('@close', () => {
-             this.transports.delete(transport.id);
+            console.log(this.name,"'s Transport is closed");
+            this.transports.delete(transport.id);
         });
     }
 
-    addProducer(producer: Producer) {
-        this.producers.set(producer.id, producer);
-        producer.on('@close', () => this.producers.delete(producer.id));
+    getTransport(transportId: string) {
+        return this.transports.get(transportId);
     }
 
-    addConsumer(consumer: Consumer) {
-        this.consumers.set(consumer.id, consumer);
-        consumer.on('@close', () => this.consumers.delete(consumer.id));
+    addProducer(producer: Producer, kind: string) {
+        this.producers.set(producer.id, {producer: producer, kind: kind});
+        producer.on('@close', () => {
+            this.producers.delete(producer.id);
+        });
     }
 
     getProducer(producerId: string) {
-        return this.producers.get(producerId);
+        return this.producers.get(producerId)?.producer;
     }
 
-    getConsumer(consumerId: string) {
-        return this.consumers.get(consumerId);
+    getConsumer(consumerId: string){
+        return this.consumers.get(consumerId)?.consumer
     }
 
-    // The "Nuke" button for this user
+    addConsumer(consumer: Consumer, kind: string) {
+        this.consumers.set(consumer.id, {consumer: consumer, kind: kind});
+        consumer.on('@close', () => {
+            this.consumers.delete(consumer.id);
+        });
+    }
+
     close() {
         this.transports.forEach(transport => transport.close());
     }
