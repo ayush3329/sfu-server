@@ -1,0 +1,11 @@
+--------------------------> Events emiited by server <----------------------------------
+
+1. all-users-> Return {username, roomId, sockerId} of all the users in the rooom. 
+This events helps client to create the User Tile on the frontend.
+
+2. user-joined-> When a user joins a room they send this event to all the users in the room to 
+with its detail so that they can create User Tile on the frontend.
+
+
+----------------------------> Events emitted by frontend <----------------------------------
+1. getRouterRtpCapabilities

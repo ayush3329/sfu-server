@@ -34,7 +34,8 @@ export interface Producer {
   username: string;
   socketId: string;
   transportId: string;
-  producer: mediasoup.types.Producer<mediasoup.types.AppData>
+  producer: mediasoup.types.Producer<mediasoup.types.AppData>,
+  associatedConsumers: string[]
 }
 
 export interface Consumer {
