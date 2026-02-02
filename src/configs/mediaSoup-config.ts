@@ -57,7 +57,7 @@ const config: AppConfig = {
     listenIps: [
       {
         ip: '0.0.0.0', // Listen on all interfaces
-        announcedIp: '10.240.48.223' // REPLACE with Public IP on production!
+        announcedIp: '192.168.0.108' // REPLACE with Public IP on production!
       }
     ],
     maxIncomingBitrate: 1500000,

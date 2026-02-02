@@ -2,7 +2,6 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { RoomManager } from './lib/RoomManager';
-import  config  from './configs/mediaSoup-config';
 
 const app = express();
 const httpServer = createServer(app);
@@ -40,7 +39,7 @@ io.on('connection', (socket) => {
     (async () => {
         const { room, peer } = await roomManager.joinRoom(roomId, socket.id, username);
         //room -> Object of Room class. It holds all necessary information of a meeting Room. Like, all peers
-        // peer -> Object of Peer class. It holds all necessary information about a single (current) user.
+        //peer -> Object of Peer class. It holds all necessary information about a single (current) user.
         
         socket.join(roomId);
 
@@ -49,7 +48,7 @@ io.on('connection', (socket) => {
             .filter(p => p.id !== socket.id)
             .map(p => ({ username: p.name, roomId: room.id, socketId: p.id }));
         
-        socket.emit('all-users', usersInRoom);
+        socket.emit('all-users', usersInRoom); 
 
         // 2. Notify others (Event: 'user-joined')
         socket.to(roomId).emit('user-joined', { socketId: socket.id, username });
@@ -134,17 +133,18 @@ io.on('connection', (socket) => {
                     producer.close();
                 });
                 
-                // Fix for the interval memory leak:
-                if(kind === "audio"){
-                    const statsInterval = setInterval(async () => {
-                            if(producer.closed) {
-                                clearInterval(statsInterval);
-                                return;
-                            }
-                            const stats = await producer.getStats();
-                            console.log("Stats:", stats[0].bitrate);
-                    }, 2000);
-                }
+                // try{
+                //     const statsInterval = setInterval(async () => {
+                //         if(producer.closed) {
+                //             clearInterval(statsInterval);
+                //             return;
+                //         }
+                //         const stats = await producer.getStats();
+                //         console.log(peer.name,": ",kind, "Stats:", stats[0].packetCount);
+                //     }, 2000);
+                // } catch(err){
+                //     console.log(peer.name,": ", kind, "Package inspection issue ", err)
+                // }
                 callback({ id: producer.id, kind });
 
             } catch (e: any) {
